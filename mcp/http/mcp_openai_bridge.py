@@ -1,12 +1,13 @@
+# filename: openai_bridge.py
 import os
 import json
 import uuid
 import requests
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
 # --- OpenAI SDK (v1.x) ---
 from openai import OpenAI
-client = OpenAI(api_key="sk-proj-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX")
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", "sk-proj-xxx"))
 
 MCP_URL = os.environ.get("MCP_URL", "http://localhost:8080/mcp")
 MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
@@ -14,29 +15,36 @@ MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 # ---------- MCP helpers ----------
 def mcp_jsonrpc(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
     payload = {"jsonrpc": "2.0", "id": str(uuid.uuid4()), "method": method, "params": params}
-    r = requests.post(MCP_URL, json=payload, timeout=30)
+    r = requests.post(MCP_URL, json=payload, timeout=60)
     r.raise_for_status()
     data = r.json()
     if "error" in data:
         raise RuntimeError(f"MCP error {data['error'].get('code')}: {data['error'].get('message')}")
     return data["result"]
 
+def mcp_initialize():
+    return mcp_jsonrpc("initialize", {})
+
 def mcp_list_tools() -> List[Dict[str, Any]]:
-    """Returns MCP tools (name, description, inputSchema)."""
-    # Your Flask server implements JSON-RPC "listTools"
-    res = mcp_jsonrpc("listTools", {})
-    return res["tools"]
+    res = mcp_jsonrpc("tools/list", {"cursor": None})
+    return res.get("tools", [])
 
 def mcp_call_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
-    """Calls a tool and returns MCP's content payload."""
-    res = mcp_jsonrpc("callTool", {"toolName": name, "arguments": args})
-    return res  # { "content": [ {type,text/json,...}, ... ] }
+    return mcp_jsonrpc("tools/call", {"name": name, "arguments": args})
 
-# ---------- Convert MCP → OpenAI tools ----------
+# Optional helpers
+def mcp_resources_list() -> List[Dict[str, Any]]:
+    res = mcp_jsonrpc("resources/list", {})
+    return res.get("resources", [])
+
+def mcp_resources_read(uri: str) -> Dict[str, Any]:
+    res = mcp_jsonrpc("resources/read", {"uri": uri})
+    return res
+
+# ---------- Convert MCP → OpenAI function tools ----------
 def to_openai_tools(mcp_tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     tools = []
     for t in mcp_tools:
-        # OpenAI expects: {"type":"function","function":{"name","description","parameters"}}
         tools.append({
             "type": "function",
             "function": {
@@ -48,8 +56,8 @@ def to_openai_tools(mcp_tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return tools
 
 # ---------- Chat loop with tool-calling ----------
-def run_chat(prompt: str, system: str = "You are a helpful assistant.") -> str:
-    # 1) Load / refresh tool list from MCP
+def run_chat(prompt: str, system: str = "You are a cautious assistant that prefers using available tools.") -> str:
+    mcp_initialize()  # make sure server is ready
     mcp_tools = mcp_list_tools()
     tools = to_openai_tools(mcp_tools)
 
@@ -58,7 +66,6 @@ def run_chat(prompt: str, system: str = "You are a helpful assistant.") -> str:
         {"role": "user", "content": prompt}
     ]
 
-    # Up to a few iterations to satisfy tool calls
     for _ in range(8):
         resp = client.chat.completions.create(
             model=MODEL,
@@ -71,19 +78,21 @@ def run_chat(prompt: str, system: str = "You are a helpful assistant.") -> str:
         tool_calls = msg.tool_calls or []
 
         if not tool_calls:
-            # Done—assistant has final answer
             return msg.content or ""
 
-        # The model requested tool calls; satisfy each, append tool results, and loop
-        messages.append({"role": "assistant", "content": msg.content or "", "tool_calls": [tc.dict() for tc in tool_calls]})
+        # echo assistant msg (if any) so model can keep its chain-of-thought (not shown to user)
+        messages.append({
+            "role": "assistant",
+            "content": msg.content or "",
+            "tool_calls": [tc.dict() for tc in tool_calls]
+        })
 
         for tc in tool_calls:
             name = tc.function.name
             args = json.loads(tc.function.arguments or "{}")
-
             try:
                 mcp_result = mcp_call_tool(name, args)
-                # Prefer JSON content if present; otherwise concatenate text parts
+                # Return JSON directly if present; else compose from text parts
                 text_parts = []
                 json_obj = None
                 for part in mcp_result.get("content", []):
@@ -92,14 +101,7 @@ def run_chat(prompt: str, system: str = "You are a helpful assistant.") -> str:
                     elif part.get("type") == "text":
                         text_parts.append(part.get("text", ""))
 
-                # Payload back to the model as the "tool" role message
-                content_for_model = None
-                if json_obj is not None:
-                    # Return JSON to the model (best for structured follow-ups)
-                    content_for_model = json.dumps(json_obj, ensure_ascii=False)
-                else:
-                    content_for_model = "\n".join(tp for tp in text_parts if tp)
-
+                content_for_model = json.dumps(json_obj, ensure_ascii=False) if json_obj is not None else "\n".join(tp for tp in text_parts if tp)
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
@@ -107,7 +109,6 @@ def run_chat(prompt: str, system: str = "You are a helpful assistant.") -> str:
                     "content": content_for_model or ""
                 })
             except Exception as e:
-                # Surface the error to the model so it can recover or apologize
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
@@ -115,10 +116,9 @@ def run_chat(prompt: str, system: str = "You are a helpful assistant.") -> str:
                     "content": json.dumps({"error": str(e)})
                 })
 
-    # Fallback if we somehow loop too much
-    return "Sorry—too many tool-calling steps without reaching a final answer."
+    return "Too many tool-calling steps."
 
-# ---------- Optional: minimal Flask for chatting ----------
+# ---------- Minimal Flask for chatting (optional) ----------
 if __name__ == "__main__":
     from flask import Flask, request, jsonify
     app = Flask(__name__)

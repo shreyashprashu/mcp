@@ -1,84 +1,115 @@
-# MCP Flask Server with OpenAI Bridge
+# MCP Tools (Flask + OpenAI Bridge)
 
-This project demonstrates how to run a **Minimal Control Protocol (MCP)** server with Flask, expose its tools, and connect it to OpenAI’s API via a bridge.
+This project provides a **Minimal Control Protocol (MCP) server** exposing simple utility tools, along with a **bridge to OpenAI’s API** that enables automatic tool-calling inside chat completions.
+
+It includes multiple components:
+
+* **MCP Server (Flask)** – A JSON-RPC API exposing tools over HTTP.
+* **MCP Server (stdio)** – An alternative stdio-based MCP server for local clients.
+* **Client** – Example async client demonstrating how to connect and call MCP tools.
+* **OpenAI Bridge** – Connects MCP tools to OpenAI’s `chat.completions` endpoint, letting GPT automatically discover and call tools.
 
 ---
 
-## 🔍 Health Check
+## 🚀 Features
 
-Verify the server is running:
+* Implements the **MCP protocol** over both HTTP (Flask) and stdio.
+* Exposes a catalog of tools:
 
-```bash
-curl -X GET https://localhost:8080/health
+  * **echo** – Returns back a string.
+  * **add\_numbers** – Sums a list of numbers.
+  * **now** – Returns the current datetime (with optional timezone).
+  * **word\_count** – Counts words and characters in text.
+* JSON-RPC compliant endpoints (`listTools`, `callTool`, `initialize`).
+* CORS-friendly Flask server for web integrations.
+* Full **OpenAI integration**: tools are dynamically mapped into OpenAI’s tool schema so GPT models can invoke them seamlessly.
+* Example client to test MCP servers directly.
+
+---
+
+## 📂 Project Structure
+
+```
+mcp/
+├── server.py              # stdio-based MCP server (async, model-driven)
+├── mcp_plain_flask_app.py # HTTP MCP server with Flask
+├── client.py              # Example MCP client (stdio)
+└── mcp_openai_bridge.py   # Bridge MCP → OpenAI tool-calling
 ```
 
 ---
 
-## ✅ MCP Endpoints
+## ⚙️ Installation
 
-### List Tools
+Requirements: **Python 3.10+**
 
 ```bash
-curl -X POST https://localhost:8080/mcp \
+pip install flask requests openai python-dateutil pytz mcp
+```
+
+---
+
+## 🖥️ Running the MCP Servers
+
+### 1. Flask MCP Server (HTTP)
+
+Start the HTTP server (serves `/mcp` on port 8080):
+
+```bash
+python mcp_plain_flask_app.py
+```
+
+Health check:
+
+```bash
+curl http://localhost:8080/health
+```
+
+List available tools:
+
+```bash
+curl -X POST http://localhost:8080/mcp \
   -H "Content-Type: application/json" \
   -d '{"method":"listTools","id":1,"jsonrpc":"2.0"}'
 ```
 
-### Call Tools
-
-**Echo**
+Call a tool:
 
 ```bash
-curl -X POST https://localhost:8080/mcp \
+curl -X POST http://localhost:8080/mcp \
   -H "Content-Type: application/json" \
-  -d '{"method":"callTool","id":2,"jsonrpc":"2.0","params":{"toolName":"echo","arguments":{"text":"Hello from Ubuntu"}}}'
+  -d '{"method":"callTool","id":2,"jsonrpc":"2.0","params":{"toolName":"echo","arguments":{"text":"Hello from MCP"}}}'
 ```
 
-**Add Numbers**
+### 2. MCP Server (stdio)
+
+Run the stdio server:
 
 ```bash
-curl -X POST https://localhost:8080/mcp \
-  -H "Content-Type: application/json" \
-  -d '{"method":"callTool","id":3,"jsonrpc":"2.0","params":{"toolName":"add_numbers","arguments":{"numbers":[10,20,30]}}}'
+python server.py
 ```
 
-**Now (with timezone)**
+### 3. Example Client
+
+Run the sample client (connects to stdio server):
 
 ```bash
-curl -X POST https://localhost:8080/mcp \
-  -H "Content-Type: application/json" \
-  -d '{"method":"callTool","id":4,"jsonrpc":"2.0","params":{"toolName":"now","arguments":{"timezone":"Asia/Kolkata"}}}'
+python client.py
 ```
 
-**Word Count**
+### 4. OpenAI Bridge
 
-```bash
-curl -X POST https://localhost:8080/mcp \
-  -H "Content-Type: application/json" \
-  -d '{"method":"callTool","id":5,"jsonrpc":"2.0","params":{"toolName":"word_count","arguments":{"text":"MCP is working on Ubuntu"}}}'
-```
-
----
-
-## 🔗 Using the OpenAI Bridge
-
-### 1. Start your MCP Flask server
-
-```bash
-python mcp_plain_flask_app.py  # serves /mcp on :8080
-```
-
-### 2. Run the OpenAI Bridge
+Start the bridge (serves `/chat` on port 8090):
 
 ```bash
 export OPENAI_API_KEY=sk-...
-python mcp_openai_bridge.py   # serves /chat on :8090
+python mcp_openai_bridge.py
 ```
 
-### 3. Try a request
+Query via chat:
 
 ```bash
-curl -s -X POST localhost:8090/chat \
+curl -s -X POST http://localhost:8090/chat \
   -H 'Content-Type: application/json' \
   -d '{"prompt":"What time is it in Asia/Kolkata and how many words in \"hello brave new world\"?"}'
 ```
